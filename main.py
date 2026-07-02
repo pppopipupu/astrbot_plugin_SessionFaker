@@ -248,8 +248,6 @@ class NodeTestPlugin(Star):
     @event_message_type(EventMessageType.ALL)
     async def on_all_message(self, event: AstrMessageEvent):
         '''监听所有消息并检测伪造消息请求'''
-        from astrbot.api.message_components import Nodes
-        
         message_text = event.message_str.strip()
         
         if not message_text.startswith("伪造消息"):
@@ -260,7 +258,13 @@ class NodeTestPlugin(Star):
         nodes_list = await self.build_nodes_from_input(raw_message, event.message_obj)
         
         if nodes_list:
-            return event.chain_result([Nodes(nodes=nodes_list)])
+            from astrbot.core.message.message_event_result import MessageChain
+            from astrbot.core.platform.message_session import MessageSession
+            from astrbot.api.message_components import Nodes
+            
+            session = MessageSession.from_str(event.unified_msg_origin)
+            await self.context.send_message(session, MessageChain(chain=[Nodes(nodes=nodes_list)]))
+            event.stop_event()
         else:
             return event.plain_result("未能解析出任何有效的消息节点")
 
@@ -276,8 +280,12 @@ class NodeTestPlugin(Star):
         nodes_list = await self.build_nodes_from_input(raw_message, event.message_obj)
         
         if nodes_list:
+            from astrbot.core.message.message_event_result import MessageChain
+            from astrbot.core.platform.message_session import MessageSession
             from astrbot.api.message_components import Nodes
-            return event.chain_result([Nodes(nodes=nodes_list)])
+            
+            session = MessageSession.from_str(event.unified_msg_origin)
+            await self.context.send_message(session, MessageChain(chain=[Nodes(nodes=nodes_list)]))
         else:
             return event.plain_result("未能解析出任何有效的消息节点")
 
@@ -305,12 +313,15 @@ class NodeTestPlugin(Star):
         nodes_list = await self.build_nodes_from_input(raw_message)
         
         if nodes_list:
+            from astrbot.core.message.message_event_result import MessageChain
+            from astrbot.core.platform.message_session import MessageSession
             from astrbot.api.message_components import Nodes
-            yield event.chain_result([Nodes(nodes=nodes_list)])
-            yield "已成功发送伪造的转发消息。"
+            
+            session = MessageSession.from_str(event.unified_msg_origin)
+            await self.context.send_message(session, MessageChain(chain=[Nodes(nodes=nodes_list)]))
+            return "已成功发送伪造的转发消息。"
         else:
-            yield event.plain_result("未能解析出任何有效的消息节点")
-            yield "构建转发消息失败，未能解析出任何有效的消息节点。"
+            return "构建转发消息失败，未能解析出任何有效的消息节点。"
 
     @filter.command("伪造帮助")
     async def help_command(self, event: AstrMessageEvent):
