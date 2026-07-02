@@ -101,7 +101,7 @@ class NodeTestPlugin(Star):
         """
         递归解析单个 content 项或 content 数组为 BaseMessageComponent 列表。
         """
-        from astrbot.api.message_components import Plain, Image as CompImage, Nodes
+        from astrbot.api.message_components import Plain, Image as CompImage
         
         components = []
         if isinstance(item, str):
@@ -114,7 +114,7 @@ class NodeTestPlugin(Star):
             if is_sub_nodes:
                 sub_nodes = await self.build_nodes_from_json_items(item)
                 if sub_nodes:
-                    components.append(Nodes(nodes=sub_nodes))
+                    components.extend(sub_nodes)
             else:
                 for sub_item in item:
                     components.extend(await self.parse_content_item(sub_item))
@@ -135,12 +135,12 @@ class NodeTestPlugin(Star):
                 if isinstance(data, list):
                     sub_nodes = await self.build_nodes_from_json_items(data)
                     if sub_nodes:
-                        components.append(Nodes(nodes=sub_nodes))
+                        components.extend(sub_nodes)
             else:
                 if "uin" in item or "qq" in item:
                     sub_node_list = await self.build_nodes_from_json_items([item])
                     if sub_node_list:
-                        components.append(Nodes(nodes=sub_node_list))
+                        components.extend(sub_node_list)
         return components
 
     async def build_nodes_from_json_items(self, json_items: list) -> list:
@@ -306,11 +306,11 @@ class NodeTestPlugin(Star):
         
         if nodes_list:
             from astrbot.api.message_components import Nodes
-            event.set_result(event.chain_result([Nodes(nodes=nodes_list)]))
-            return "已成功发送伪造的转发消息。"
+            yield event.chain_result([Nodes(nodes=nodes_list)])
+            yield "已成功发送伪造的转发消息。"
         else:
-            event.set_result(event.plain_result("未能解析出任何有效的消息节点"))
-            return "构建转发消息失败，未能解析出任何有效的消息节点。"
+            yield event.plain_result("未能解析出任何有效的消息节点")
+            yield "构建转发消息失败，未能解析出任何有效的消息节点。"
 
     @filter.command("伪造帮助")
     async def help_command(self, event: AstrMessageEvent):
