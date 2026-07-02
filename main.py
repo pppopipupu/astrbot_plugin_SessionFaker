@@ -47,10 +47,14 @@ class NodeTestPlugin(Star):
                     if isinstance(comp, Plain):
                         text = comp.text
                         
-                        if not prefix_skipped and "伪造消息" in text:
-                            prefix_pos = text.find("伪造消息")
-                            text = text[prefix_pos + len("伪造消息"):].lstrip()
-                            prefix_skipped = True
+                        # 查找并去除前缀
+                        if not prefix_skipped:
+                            for prefix in ["/fake_msg", "fake_msg", "伪造消息"]:
+                                if prefix in text:
+                                    prefix_pos = text.find(prefix)
+                                    text = text[prefix_pos + len(prefix):].lstrip()
+                                    prefix_skipped = True
+                                    break
                         
                         if "|" in text:
                             parts = text.split("|")
@@ -92,34 +96,127 @@ class NodeTestPlugin(Star):
             segments = []
         
         return segments
-    
-    @event_message_type(EventMessageType.ALL)
-    async def on_all_message(self, event: AstrMessageEvent):
-        '''监听所有消息并检测伪造消息请求'''
-        from astrbot.api.message_components import Node, Plain, Nodes, Image as CompImage
+
+    async def parse_content_item(self, item) -> list:
+        """
+        递归解析单个 content 项或 content 数组为 BaseMessageComponent 列表。
+        """
+        from astrbot.api.message_components import Plain, Image as CompImage, Nodes
         
-        message_text = event.message_str
-        
-        if not message_text.startswith("伪造消息"):
-            return
-        
-        segments = await self.parse_message_components(event.message_obj)
-        
-        if not segments:
-            pattern = r'伪造消息((?:\s+\d+\s+[^|]+\|)+)'
-            match = re.search(pattern, message_text)
+        components = []
+        if isinstance(item, str):
+            components.append(Plain(item))
+        elif isinstance(item, list):
+            # 判断这个列表里是子转发节点还是普通组件
+            # 如果列表里的每一项都是 dict 且包含 'uin' 或 'qq'，那它就是一个嵌套的转发消息 (Nodes)
+            is_sub_nodes = len(item) > 0 and all(isinstance(x, dict) and ('uin' in x or 'qq' in x) for x in item)
             
-            if not match:
-                yield event.plain_result("格式错误，请使用：伪造消息 QQ号 内容 | QQ号 内容 | ...")
-                return
-                
-            content = match.group(1).strip()
-            text_segments = content.split('|')
-            
-            segments = [{"text": seg.strip(), "images": []} for seg in text_segments if seg.strip()]
+            if is_sub_nodes:
+                sub_nodes = await self.build_nodes_from_json_items(item)
+                if sub_nodes:
+                    components.append(Nodes(nodes=sub_nodes))
+            else:
+                for sub_item in item:
+                    components.extend(await self.parse_content_item(sub_item))
+        elif isinstance(item, dict):
+            comp_type = item.get("type", "").lower()
+            if comp_type in ["text", "plain"]:
+                text_val = item.get("text") or item.get("value") or ""
+                components.append(Plain(str(text_val)))
+            elif comp_type in ["image", "img"]:
+                img_url = item.get("url") or item.get("value") or ""
+                if img_url:
+                    try:
+                        components.append(CompImage.fromURL(img_url))
+                    except Exception as e:
+                        logger.debug(f"解析 JSON 图片组件失败: {e}")
+            elif comp_type in ["node", "nodes"]:
+                data = item.get("data") or item.get("content") or []
+                if isinstance(data, list):
+                    sub_nodes = await self.build_nodes_from_json_items(data)
+                    if sub_nodes:
+                        components.append(Nodes(nodes=sub_nodes))
+            else:
+                if "uin" in item or "qq" in item:
+                    sub_node_list = await self.build_nodes_from_json_items([item])
+                    if sub_node_list:
+                        components.append(Nodes(nodes=sub_node_list))
+        return components
+
+    async def build_nodes_from_json_items(self, json_items: list) -> list:
+        """
+        从解析后的 JSON 字典列表中构建 Node 对象列表 (支持递归嵌套)
+        """
+        from astrbot.api.message_components import Node, Plain, Image as CompImage
         
         nodes_list = []
+        for item in json_items:
+            uin = item.get("uin") or item.get("qq")
+            if not uin:
+                continue
+            name = item.get("name") or item.get("nickname")
+            if not name:
+                name = await self.get_qq_nickname(str(uin))
+                
+            content_data = item.get("content") or item.get("text") or ""
+            node_content = await self.parse_content_item(content_data)
+            
+            # 兼容旧有格式中的 images 字段
+            images = item.get("images") or []
+            if isinstance(images, str):
+                images = [images]
+            for img_url in images:
+                try:
+                    node_content.append(CompImage.fromURL(img_url))
+                except Exception as e:
+                    logger.debug(f"解析 JSON 独立 images 字段失败: {e}")
+                    
+            node = Node(
+                uin=int(uin),
+                name=str(name),
+                content=node_content
+            )
+            nodes_list.append(node)
+            
+        return nodes_list
+
+    async def build_nodes_from_input(self, text_content: str, message_obj=None) -> list:
+        """
+        根据输入文本和消息对象构建 Node 对象列表
+        """
+        from astrbot.api.message_components import Node, Plain, Image as CompImage
         
+        text_content_stripped = text_content.strip()
+        is_json = False
+        json_data = None
+        
+        if (text_content_stripped.startswith("[") and text_content_stripped.endswith("]")) or \
+           (text_content_stripped.startswith("{") and text_content_stripped.endswith("}")):
+            try:
+                json_data = json.loads(text_content_stripped)
+                is_json = True
+            except Exception as e:
+                logger.debug(f"尝试解析JSON失败: {e}")
+                
+        if is_json:
+            if isinstance(json_data, dict):
+                json_items = [json_data]
+            elif isinstance(json_data, list):
+                json_items = json_data
+            else:
+                json_items = []
+            return await self.build_nodes_from_json_items(json_items)
+            
+        # 旧有格式解析
+        segments = []
+        if message_obj:
+            segments = await self.parse_message_components(message_obj)
+            
+        if not segments:
+            text_segments = text_content.split('|')
+            segments = [{"text": seg.strip(), "images": []} for seg in text_segments if seg.strip()]
+            
+        nodes_list = []
         for segment in segments:
             text = segment["text"]
             images = segment["images"]
@@ -130,50 +227,119 @@ class NodeTestPlugin(Star):
                 continue
                 
             qq_number, content = match.group(1), match.group(2).strip()
-            
             nickname = await self.get_qq_nickname(qq_number)
             
             node_content = [Plain(content)]
-            
             for img_url in images:
                 try:
                     node_content.append(CompImage.fromURL(img_url))
-                    logger.debug(f"为QQ {qq_number} 添加图片: {img_url}")
                 except Exception as e:
                     logger.debug(f"添加图片到节点失败: {e}")
-            
+                    
             node = Node(
                 uin=int(qq_number),
                 name=nickname,
                 content=node_content
             )
             nodes_list.append(node)
+            
+        return nodes_list
+
+    @event_message_type(EventMessageType.ALL)
+    async def on_all_message(self, event: AstrMessageEvent):
+        '''监听所有消息并检测伪造消息请求'''
+        from astrbot.api.message_components import Nodes
+        
+        message_text = event.message_str.strip()
+        
+        if not message_text.startswith("伪造消息"):
+            return
+            
+        raw_message = message_text[len("伪造消息"):].lstrip()
+        
+        nodes_list = await self.build_nodes_from_input(raw_message, event.message_obj)
         
         if nodes_list:
-            nodes = Nodes(nodes=nodes_list)
-            yield event.chain_result([nodes])
+            return event.chain_result([Nodes(nodes=nodes_list)])
         else:
-            yield event.plain_result("未能解析出任何有效的消息节点")
-    
+            return event.plain_result("未能解析出任何有效的消息节点")
+
+    @filter.command("fake_msg")
+    async def fake_msg_command(self, event: AstrMessageEvent):
+        """伪造转发消息"""
+        raw_message = event.message_str.strip()
+        for prefix in ["/fake_msg", "fake_msg"]:
+            if raw_message.startswith(prefix):
+                raw_message = raw_message[len(prefix):].lstrip()
+                break
+                
+        nodes_list = await self.build_nodes_from_input(raw_message, event.message_obj)
+        
+        if nodes_list:
+            from astrbot.api.message_components import Nodes
+            return event.chain_result([Nodes(nodes=nodes_list)])
+        else:
+            return event.plain_result("未能解析出任何有效的消息节点")
+
+    @filter.llm_tool(name="fake_msg")
+    async def fake_msg_tool(self, event: AstrMessageEvent, message: str):
+        """
+        伪造并发送转发消息给当前会话。支持普通文本和嵌套的合并转发卡片。
+
+        Args:
+            message(string): 伪造消息的内容。
+                - 格式A（普通纯文本）：QQ号 消息内容 | QQ号 消息内容。
+                - 格式B（嵌套JSON，推荐）：传入一个 JSON 数组。数组中的每个元素代表一条消息气泡，其字典字段包括：
+                  * uin (number/string, 必填): 发送者 QQ。
+                  * name (string, 可选): 发送者昵称（省略时自动获取）。
+                  * content (string/array, 必填): 消息内容。若需要嵌套另一层合并转发卡片，应将 content 设为子节点数组。例如：
+                    [{"uin": 12345, "name": "张三", "content": [{"uin": 67890, "name": "李四", "content": "这是嵌套的消息"}]}]
+                  * images (array of string, 可选): 图片 URL 列表。
+        """
+        raw_message = message.strip()
+        for prefix in ["/fake_msg", "fake_msg"]:
+            if raw_message.startswith(prefix):
+                raw_message = raw_message[len(prefix):].lstrip()
+                break
+                
+        nodes_list = await self.build_nodes_from_input(raw_message)
+        
+        if nodes_list:
+            from astrbot.api.message_components import Nodes
+            event.set_result(event.chain_result([Nodes(nodes=nodes_list)]))
+            return "已成功发送伪造的转发消息。"
+        else:
+            event.set_result(event.plain_result("未能解析出任何有效的消息节点"))
+            return "构建转发消息失败，未能解析出任何有效的消息节点。"
+
     @filter.command("伪造帮助")
     async def help_command(self, event: AstrMessageEvent):
         """显示插件帮助信息"""
         help_text = """📱 伪造转发消息插件使用说明 📱
 
 【基本格式】
-伪造消息 QQ号 消息内容 | QQ号 消息内容 | ...
+- 伪造消息 QQ号 消息内容 | QQ号 消息内容 | ...
+- /fake_msg QQ号 消息内容 | QQ号 消息内容 | ...
 
-【带图片的格式】
+【JSON 格式】
+- /fake_msg [JSON内容]
+例如: /fake_msg [{"uin": 123456, "name": "张三", "content": "你好", "images": ["图片地址"]}]
+其中 name 和 images 字段是可选的。如果 name 不填，将自动获取 QQ 昵称。
+
+【嵌套 JSON 格式】
+- content 字段里可以嵌套子消息数组，例如：
+/fake_msg [{"uin": 123456, "name": "张三", "content": [{"uin": 111111, "name": "李四", "content": "嵌套消息"}]}]
+
+【带图片的格式（普通格式）】
 - 在任意消息段中添加图片，图片将只出现在它所在的消息段
-- 例如: 伪造消息 123456 看我的照片[图片] | 654321 好漂亮啊
-- 在这个例子中，图片只会出现在第一个人的消息中
+- 例如: /fake_msg 123456 看我的照片[图片] | 654321 好漂亮啊
 
 【注意事项】
-- 每个消息段之间用"|"分隔
+- 普通格式 of 每个消息段之间用"|"分隔
 - 每个消息段的格式必须是"QQ号 消息内容"
 - 图片会根据它在消息中的位置分配到对应的消息段
 """
-        yield event.plain_result(help_text)
+        return event.plain_result(help_text)
             
     async def terminate(self):
         '''插件被卸载/停用时调用'''
